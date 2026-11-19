@@ -108,7 +108,8 @@ jobs:
         run: |
           set -eux
           cmake --preset kernarium-ios-device-android -DPython3_EXECUTABLE="$(command -v python3)"
-          cmake --build --preset kernarium-ios-device-android
+          # -k 0: report every remaining iOS 27-only call in one run.
+          cmake --build --preset kernarium-ios-device-android -- -k 0
           Kernarium/scripts/package-ios-frameworks.sh --runtimes android
           python3 Andarium/scripts/stage-system-image.py
           rm -rf .build/android/releases

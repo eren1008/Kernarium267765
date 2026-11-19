@@ -158,16 +158,36 @@ private:
             const std::weak_ptr<Capture> weak = weak_from_this();
             const auto tap = std::make_shared<MicrophoneTap>(converter, converted, *ring, channels,
                                                              protocol::sampleRate);
-            NSError* tapError = nil;
-            const BOOL tapped = [input
-                installTapOnBus:0
-                     bufferSize:static_cast<AVAudioFrameCount>(
-                                    inputFormat.sampleRate * tapSeconds)
-                         format:inputFormat
-                          error:&tapError
-                          block:^(AVAudioPCMBuffer* buffer, AVAudioTime* when) {
-                              tap->receive(buffer, when);
-                          }];
+            const auto tapBufferSize = static_cast<AVAudioFrameCount>(
+                inputFormat.sampleRate * tapSeconds);
+            AVAudioNodeTapBlock tapBlock =
+                ^(AVAudioPCMBuffer* buffer, AVAudioTime* when) {
+                  tap->receive(buffer, when);
+                };
+            BOOL tapped = NO;
+            if (@available(iOS 27.0, macOS 27.0, *)) {
+                NSError* tapError = nil;
+                tapped = [input installTapOnBus:0
+                                     bufferSize:tapBufferSize
+                                         format:inputFormat
+                                          error:&tapError
+                                          block:tapBlock];
+            } else {
+                /* iOS 26 compatibility: the tap without an error argument
+                 * raises an exception where iOS 27 reports an error. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                @try {
+                    [input installTapOnBus:0
+                                bufferSize:tapBufferSize
+                                    format:inputFormat
+                                     block:tapBlock];
+                    tapped = YES;
+                } @catch (NSException*) {
+                    tapped = NO;
+                }
+#pragma clang diagnostic pop
+            }
             if (!tapped) {
                 closeSession();
                 return false;
