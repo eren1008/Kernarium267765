@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-# Adds MindTheGapps (Android 17, arm64) to the Android system inside the
-# "andarium-ios26" IPA of this repository and publishes the result as the DRAFT
-# release "andarium-ios26-gapps". A draft is visible only to the repository's
-# owner, so the Google apps inside it are not redistributed publicly.
-name: Andarium iOS 26 IPA with GApps
+# Adds MindTheGapps (Android 17, arm64) to the Android system inside an
+# Andarium IPA (by default the original one of upstream's 1.0b15-release) and
+# publishes the result as a DRAFT release of this repository. A draft is visible
+# only to the repository's owner, so the Google apps in it are not redistributed
+# publicly.
+name: Andarium IPA with GApps
 
 on:
   workflow_dispatch:
@@ -17,6 +18,13 @@ permissions:
 env:
   # A run whose andarium-system-gapps artifact to reuse; empty to rebuild it.
   REUSE_RUN: ""
+  # The IPA to add GApps to: a release of a repository, and an asset pattern.
+  BASE_REPO: imxieyi/Kernarium
+  BASE_RELEASE: 1.0b15-release
+  BASE_PATTERN: "*.ipa"
+  OUT_RELEASE: andarium-gapps
+  OUT_IPA: Andarium-GApps.ipa
+  OUT_TITLE: Andarium 1.0 (15) with Google apps
 
 concurrency:
   group: andarium-gapps-ipa
@@ -29,8 +37,6 @@ jobs:
     timeout-minutes: 90
     env:
       GH_TOKEN: ${{ github.token }}
-      BASE_RELEASE: andarium-ios26
-      BASE_IPA: Andarium-iOS26.ipa
       GAPPS_REPO: MindTheGapps/17.0.0-arm64
     steps:
       - uses: actions/checkout@v4
@@ -64,14 +70,19 @@ jobs:
         run: |
           set -eux
           mkdir -p dl
-          gh release download "$BASE_RELEASE" -R "$GITHUB_REPOSITORY" -p "$BASE_IPA" -D dl
+          gh release view "$BASE_RELEASE" -R "$BASE_REPO" --json tagName,name,publishedAt,assets \
+            --jq '.tagName, .name, .publishedAt, (.assets[] | "\(.name) \(.size)")'
+          gh release download "$BASE_RELEASE" -R "$BASE_REPO" -p "$BASE_PATTERN" -D dl
+          ipa=$(ls dl/*.ipa | head -1)
+          unzip -p "$ipa" 'Payload/*.app/Info.plist' > Info.plist
+          python3 -c "import plistlib; p = plistlib.load(open('Info.plist', 'rb')); print({k: p.get(k) for k in ('CFBundleIdentifier', 'CFBundleShortVersionString', 'CFBundleVersion', 'MinimumOSVersion')})"
           gh release view -R "$GAPPS_REPO" --json tagName,publishedAt,assets \
             --jq '.tagName, .publishedAt, (.assets[] | "\(.name) \(.size)")'
           gh release download -R "$GAPPS_REPO" -p 'MindTheGapps-*.zip' -D dl
           ls -la dl
-          unzip -q "dl/$BASE_IPA" 'Payload/*.app/andarium-system/*' -d base
+          unzip -q "$ipa" 'Payload/*.app/andarium-system/*' -d base
           find base -maxdepth 6 | head -20
-          rm "dl/$BASE_IPA"
+          rm "$ipa"
           df -h /
 
       - name: Add GApps
@@ -105,10 +116,6 @@ jobs:
     timeout-minutes: 60
     env:
       GH_TOKEN: ${{ github.token }}
-      BASE_RELEASE: andarium-ios26
-      BASE_IPA: Andarium-iOS26.ipa
-      OUT_RELEASE: andarium-ios26-gapps
-      OUT_IPA: Andarium-iOS26-GApps.ipa
     steps:
       - uses: actions/checkout@v4
         with:
@@ -131,11 +138,13 @@ jobs:
       - name: Put the new system into the IPA and sign it ad hoc
         run: |
           set -eux
-          gh release download "$BASE_RELEASE" -R "$GITHUB_REPOSITORY" -p "$BASE_IPA" -D dl
+          gh release download "$BASE_RELEASE" -R "$BASE_REPO" -p "$BASE_PATTERN" -D dl
+          base=$(ls "$PWD"/dl/*.ipa | head -1)
           mkdir ipa
-          (cd ipa && unzip -q "../dl/$BASE_IPA")
-          rm "dl/$BASE_IPA"
+          (cd ipa && unzip -q "$base")
+          rm "$base"
           app=$(ls -d ipa/Payload/*.app)
+          plutil -p "$app/Info.plist" | grep -E 'MinimumOSVersion|CFBundleShortVersionString|CFBundleVersion|CFBundleIdentifier'
           system="$app/andarium-system"
           for file in guest/system.img guest/partition-layout.json release-manifest.json; do
             test -f "$system/$file"
@@ -143,9 +152,15 @@ jobs:
             cp "gapps/$file" "$system/$file"
           done
           ls -la "$system" "$system/guest"
-          # Ad hoc signature carrying the app's entitlements (extended virtual
-          # addressing, increased memory limit), as the base IPA has.
-          codesign -f -s - --entitlements Andarium/Config/Andarium.entitlements "$app"
+          # Ad hoc signatures that keep the base IPA's own entitlements (extended
+          # virtual addressing, increased memory limit), so sideloading keeps them.
+          codesign -d --entitlements - --xml "$app" > entitlements.plist 2>/dev/null || true
+          if ! grep -q '<key>' entitlements.plist; then
+            cp Andarium/Config/Andarium.entitlements entitlements.plist
+          fi
+          cat entitlements.plist
+          for framework in "$app"/Frameworks/*.framework; do codesign -f -s - "$framework"; done
+          codesign -f -s - --entitlements entitlements.plist "$app"
           codesign -d --entitlements - "$app"
           codesign --verify --strict --verbose=2 "$app" || echo "::warning::codesign --verify failed"
           (cd ipa && zip -qry "../$OUT_IPA" Payload)
@@ -157,6 +172,6 @@ jobs:
           set -eux
           gh release create "$OUT_RELEASE" -R "$GITHUB_REPOSITORY" --draft \
             --target "$GITHUB_SHA" \
-            --title "Andarium 1.0 (15) for iOS 26 with Google apps" \
-            --notes "Andarium-iOS26.ipa with MindTheGapps 17 (slim set, no Android Switch) added to the Android product and system_ext partitions. Delete the old Andarium app (or erase its virtual machine) before using this one. Built from commit ${GITHUB_SHA}." \
+            --title "$OUT_TITLE" \
+            --notes "The $BASE_RELEASE IPA of $BASE_REPO with MindTheGapps 17 (slim set, no Android Switch) added to the Android product and system_ext partitions. Delete the old Andarium app (or erase its virtual machine) before using this one. Built from commit ${GITHUB_SHA}." \
             "$OUT_IPA" "$OUT_IPA.sha256"
