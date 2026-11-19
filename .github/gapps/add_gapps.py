@@ -257,7 +257,7 @@ def main() -> int:
     mkfs_help = help_text("mkfs.erofs")
     log(subprocess.run(["mkfs.erofs", "-V"], text=True, stdout=subprocess.PIPE,
                        stderr=subprocess.STDOUT, check=False).stdout.strip())
-    if "xattrs" not in fsck_help or "--preserve" not in fsck_help:
+    if "xattrs" not in fsck_help or "preserve" not in fsck_help:
         log(fsck_help)
         raise Failure("this fsck.erofs cannot extract owners and extended attributes")
 
