@@ -1,0 +1,172 @@
+# Builds Andarium 1.0 (15) with an iOS 26.0 minimum and publishes an unsigned,
+# ad-hoc-entitled IPA as the release "andarium-ios26" of this repository.
+# Source: tag 1.0b15-release of imxieyi/Kernarium plus the ios26-compat changes.
+name: Andarium iOS 26 IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ios26-compat]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: andarium-ios26-ipa
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 355
+    env:
+      UPSTREAM: imxieyi/Kernarium
+      UPSTREAM_TAG: 1.0b15-release
+      GH_TOKEN: ${{ github.token }}
+      JOBS: "3"
+      DEPS_KEY_SALT: v1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Toolchain
+        run: |
+          set -eux
+          sw_vers; uname -m; sysctl -n hw.ncpu hw.memsize; df -h /
+          ls -d /Applications/Xcode*.app || true
+          XCODE=$(ls -d /Applications/Xcode_27*.app 2>/dev/null | grep -v -i beta | sort -V | tail -1 || true)
+          if [ -n "$XCODE" ]; then sudo xcode-select -s "$XCODE"; fi
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          brew install ninja meson pkgconf autoconf automake libtool gettext gperf groff rsync gptfdisk erofs-utils e2fsprogs || true
+          echo "$(brew --prefix gettext)/bin" >> "$GITHUB_PATH"
+          python3 -m venv .build/gpu-tools-venv
+          .build/gpu-tools-venv/bin/pip install --quiet meson mako pyyaml packaging
+          xcodebuild -downloadComponent MetalToolchain
+          git config --global user.name "Andarium iOS 26 build"
+          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+          cmake --version; python3 --version
+
+      - name: Restore dependency prefixes
+        id: deps
+        uses: actions/cache/restore@v4
+        with:
+          path: .build/dependencies
+          key: ios26-deps-${{ env.DEPS_KEY_SALT }}-${{ hashFiles('dependencies/**', 'cmake/toolchains/Apple.cmake', 'tools/rootfs/vulkan/patches/**') }}
+
+      - name: Prepare and build the iOS dependencies (iOS 26.0 floor)
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          for product in ios-storage ios-compression ios-network apple-gpu-vulkan-experiment; do
+            dependencies/prepare.sh --product "$product"
+          done
+          dependencies/build-ios-storage.sh --jobs "$JOBS"
+          dependencies/build-ios-zstd.sh --jobs "$JOBS"
+          dependencies/build-ios-network.sh --platform ios --jobs "$JOBS"
+          dependencies/build-apple-gpu.sh --platform ios --jobs "$JOBS"
+          rm -rf .build/dependency-build
+          df -h /
+
+      - name: Save dependency prefixes
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .build/dependencies
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
+      - name: Fetch the accepted kernel bundle and Android system (from the upstream release)
+        run: |
+          set -eux
+          mkdir -p .build/downloads .build/kernel/artifacts
+          gh release download "$UPSTREAM_TAG" -R "$UPSTREAM" -D .build/downloads \
+            -p 'android-6.18-*.tar.gz' -p 'lineage24-*.tar.gz'
+          ls -la .build/downloads
+
+          # Kernel bundle: its directory must carry the accepted directory name.
+          . kernel/mainline-6.18/artifacts/accepted-android-4k.env
+          mkdir -p .build/downloads/kernel
+          tar -xzf .build/downloads/android-6.18-*.tar.gz -C .build/downloads/kernel
+          manifest=$(find .build/downloads/kernel -name kernel-artifact.json | head -1)
+          rm -rf ".build/kernel/artifacts/$UML_KERNEL_ARTIFACT_DIRECTORY_NAME"
+          mv "$(dirname "$manifest")" ".build/kernel/artifacts/$UML_KERNEL_ARTIFACT_DIRECTORY_NAME"
+          ls -la ".build/kernel/artifacts/$UML_KERNEL_ARTIFACT_DIRECTORY_NAME"
+
+          # Android system release, installed and checked by the project's installer.
+          mkdir -p .build/downloads/system
+          tar -xzf .build/downloads/lineage24-*.tar.gz -C .build/downloads/system
+          rm -f .build/downloads/lineage24-*.tar.gz
+          release=$(dirname "$(find .build/downloads/system -name release-manifest.json | head -1)")
+          python3 android/lineage-24/tools/install-release.py --source "$PWD/$release"
+          rm -rf .build/downloads
+          df -h /
+
+      - name: Build the Android runtime (CMake, iOS 26.0)
+        run: |
+          set -eux
+          cmake --preset kernarium-ios-device-android -DPython3_EXECUTABLE="$(command -v python3)"
+          cmake --build --preset kernarium-ios-device-android
+          Kernarium/scripts/package-ios-frameworks.sh --runtimes android
+          python3 Andarium/scripts/stage-system-image.py
+          rm -rf .build/android/releases
+          df -h /
+
+      - name: Build Andarium (Release, unsigned, iOS 26.0 minimum)
+        run: |
+          set -eux -o pipefail
+          xcodebuild -project Andarium/Andarium.xcodeproj -scheme Andarium \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -derivedDataPath .build/xcode \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build > .build/xcodebuild.log 2>&1 || {
+              grep -E 'error:|only available in iOS' .build/xcodebuild.log | sort -u | head -200
+              tail -60 .build/xcodebuild.log
+              exit 1
+            }
+          grep -E 'only available in iOS|warning: .*deprecated' .build/xcodebuild.log | sort -u | head -50 || true
+          tail -5 .build/xcodebuild.log
+
+      - name: Package Andarium-iOS26.ipa
+        run: |
+          set -eux
+          APP=.build/xcode/Build/Products/Release-iphoneos/Andarium.app
+          plutil -p "$APP/Info.plist" | grep -E 'MinimumOSVersion|CFBundleShortVersionString|CFBundleVersion|CFBundleIdentifier'
+          for binary in "$APP/Andarium" "$APP"/Frameworks/*.framework/*; do
+            if [ -f "$binary" ] && file "$binary" | grep -q Mach-O; then
+              echo "$binary: $(vtool -show-build "$binary" | grep -E 'minos' | head -1)"
+            fi
+          done
+          # Ad-hoc signatures that carry the app's entitlements (extended virtual
+          # addressing, increased memory limit), so sideloading tools keep them.
+          for framework in "$APP"/Frameworks/*.framework; do codesign -f -s - "$framework"; done
+          codesign -f -s - --entitlements Andarium/Config/Andarium.entitlements "$APP"
+          codesign -d --entitlements - "$APP"
+          mkdir -p .build/ipa/Payload
+          mv "$APP" .build/ipa/Payload/
+          (cd .build/ipa && zip -qry Andarium-iOS26.ipa Payload && rm -rf Payload)
+          ls -lh .build/ipa/Andarium-iOS26.ipa
+          shasum -a 256 .build/ipa/Andarium-iOS26.ipa | tee .build/ipa/Andarium-iOS26.ipa.sha256
+
+      - name: Publish the release "andarium-ios26"
+        run: |
+          set -eux
+          gh release delete andarium-ios26 -R "$GITHUB_REPOSITORY" -y --cleanup-tag || true
+          gh release create andarium-ios26 -R "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Andarium 1.0 (15) for iOS 26" \
+            --notes "Andarium 1.0 build 15 (upstream tag ${UPSTREAM_TAG}) rebuilt with an iOS 26.0 minimum. Unsigned with ad-hoc entitlements: sideload it, and keep the Increased Memory Limit and Extended Virtual Addressing entitlements. Built from commit ${GITHUB_SHA}." \
+            .build/ipa/Andarium-iOS26.ipa .build/ipa/Andarium-iOS26.ipa.sha256
+
+      - name: Keep the build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            .build/xcodebuild.log
+            .build/kernarium-runtime-ios-device-android-4k/CMakeFiles/CMakeOutput.log
+            .build/kernarium-runtime-ios-device-android-4k/CMakeFiles/CMakeError.log
+          if-no-files-found: ignore

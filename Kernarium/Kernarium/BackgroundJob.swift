@@ -120,6 +120,15 @@ struct SystemBackgroundJobScheduler: BackgroundJobScheduling {
         // iOS 27 submits off the calling thread and reports later, possibly
         // after it has already started the task.
         nonisolated(unsafe) let handed = request
+        guard #available(iOS 27.0, *) else {
+            // iOS 26 compatibility: submit(_:) reports a refusal at once.
+            do {
+                try BGTaskScheduler.shared.submit(handed)
+            } catch {
+                refused(error)
+            }
+            return
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             BGTaskScheduler.shared.submitTaskRequest(handed) { error in
                 guard let error else { return }
