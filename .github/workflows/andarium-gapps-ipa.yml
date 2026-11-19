@@ -16,7 +16,7 @@ permissions:
 
 env:
   # A run whose andarium-system-gapps artifact to reuse; empty to rebuild it.
-  REUSE_RUN: "44591988052"
+  REUSE_RUN: ""
 
 concurrency:
   group: andarium-gapps-ipa
