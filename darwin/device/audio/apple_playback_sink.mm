@@ -34,6 +34,53 @@
 namespace uml::audio {
 namespace {
 
+/* iOS 26 compatibility: iOS 27 added the error-reporting forms of the node
+ * connection and the player start. Before iOS 27 the older forms raise an
+ * exception instead, which these report as a failure. */
+bool connectNode(AVAudioEngine* engine, AVAudioNode* node, AVAudioNode* to,
+                 AVAudioFormat* format, NSError* __strong* error)
+{
+    if (@available(iOS 27.0, macOS 27.0, *)) {
+        NSError* reported = nil;
+        const BOOL connected =
+            [engine connect:node to:to format:format error:&reported];
+        if (error != nullptr)
+            *error = reported;
+        return connected;
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    bool connected = false;
+    @try {
+        [engine connect:node to:to format:format];
+        connected = true;
+    } @catch (NSException*) {
+    }
+#pragma clang diagnostic pop
+    return connected;
+}
+
+bool playNode(AVAudioPlayerNode* player, NSError* __strong* error)
+{
+    if (@available(iOS 27.0, macOS 27.0, *)) {
+        NSError* reported = nil;
+        const BOOL playing = [player playAndReturnError:&reported];
+        if (error != nullptr)
+            *error = reported;
+        return playing;
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    bool playing = false;
+    @try {
+        [player play];
+        playing = true;
+    } @catch (NSException*) {
+    }
+#pragma clang diagnostic pop
+    return playing;
+}
+
 struct NotificationFlags final {
     explicit NotificationFlags(std::shared_ptr<const Waker> source)
         : wake(std::move(source))
@@ -248,10 +295,8 @@ struct Output final {
     [output.engine attachNode:output.player];
     if (format != nil && outputRouteUp(output.engine)) {
         NSError* error = nil;
-        if ([output.engine connect:output.player
-                                to:output.engine.mainMixerNode
-                            format:format
-                             error:&error]) {
+        if (connectNode(output.engine, output.player,
+                        output.engine.mainMixerNode, format, &error)) {
             [output.engine prepare];
             output.connected = true;
         }
@@ -500,10 +545,8 @@ public:
             if (!health_.mustReplace(outputRouteUp(engine_))) {
                 [engine_ disconnectNodeOutput:player_];
                 NSError* connectError = nil;
-                if (![engine_ connect:player_
-                                   to:engine_.mainMixerNode
-                               format:format_
-                                error:&connectError]) {
+                if (!connectNode(engine_, player_, engine_.mainMixerNode,
+                                 format_, &connectError)) {
                     configured_ = false;
                     prepared_ = false;
                     running_ = false;
@@ -1073,7 +1116,7 @@ private:
                       // of after the player's own start-up.
                       if (running) {
                           AVAudioPlayerNode* const player = output.player;
-                          (void)[player playAndReturnError:&error];
+                          (void)playNode(player, &error);
                           // The engine reports that it runs well before the
                           // audio hardware delivers its first cycle: a fifth
                           // of a second has been measured on the iPad mini
@@ -1157,7 +1200,7 @@ private:
             }
             measureOutputLatency();
             leaveMute();
-            playing = [player_ playAndReturnError:&error];
+            playing = playNode(player_, &error);
         } @catch (NSException*) {
         }
         if (playing) {
@@ -1538,7 +1581,7 @@ private:
         @try {
             NSError* error = nil;
             measureOutputLatency();
-            if ([player_ playAndReturnError:&error])
+            if (playNode(player_, &error))
                 return OutputStart::running;
         } @catch (NSException*) {
         }
